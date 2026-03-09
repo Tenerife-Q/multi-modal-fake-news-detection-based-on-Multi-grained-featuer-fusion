@@ -19,8 +19,10 @@ clipmodel, preprocess = clip.load('ViT-B/32', device)
 for param in clipmodel.parameters():
     param.requires_grad = False
 
-# Load a feature extractor from the transformers library
-feature_extractor = AutoFeatureExtractor.from_pretrained("./swin-base-patch4-window7-224")
+# Load from local cache first to avoid network timeout during startup
+feature_extractor = AutoFeatureExtractor.from_pretrained(
+    "microsoft/swin-base-patch4-window7-224", local_files_only=True
+)
 
 
 # Function to read images given their paths
@@ -38,7 +40,7 @@ def read_img(imgs, root_path, LABLEF):
 
 # Custom dataset class
 class weibo_dataset(data.Dataset):
-    def __init__(self, root_path='/data/ymzhou/weibo', is_train=True):
+    def __init__(self, root_path='/root/autodl-tmp/MMFN_yyt/weibo', is_train=True):
         super(weibo_dataset, self).__init__()
         self.is_train = is_train
         self.root_path = root_path
@@ -46,7 +48,7 @@ class weibo_dataset(data.Dataset):
         self.label_dict = []
         self.swin = feature_extractor
         self.preprocess = preprocess
-        self.local_path = '/data/ymzhou/dataset'
+        self.local_path = '/root/autodl-tmp/MMFN_yyt'
 
         # Read CSV file to populate label_dict
         wb = pandas.read_csv(self.local_path + '/{}_weibov.csv'.format('train' if is_train else 'test'))
@@ -81,8 +83,13 @@ class weibo_dataset(data.Dataset):
         except Exception:
             raise IOError("Load {} Error {}".format(imgs, record['images']))
 
+        try:
+            swin_pixels = self.swin(img_GT, return_tensors="pt", do_rescale=False).pixel_values
+        except TypeError:
+            swin_pixels = self.swin(img_GT, return_tensors="pt").pixel_values
+
         return (
-            content, self.swin(img_GT, return_tensors="pt").pixel_values, self.preprocess(img_pro), sum_content), label
+            content, swin_pixels, self.preprocess(img_pro), sum_content), label
 
     def __len__(self):
         return len(self.label_dict)
@@ -94,7 +101,7 @@ class weibo_dataset(data.Dataset):
 
 
 # Populate label_dict with records from the CSV file
-token = BertTokenizer.from_pretrained('bert-base-chinese')
+token = BertTokenizer.from_pretrained('bert-base-chinese', local_files_only=True)
 
 
 # Populate label_dict with records from the CSV file

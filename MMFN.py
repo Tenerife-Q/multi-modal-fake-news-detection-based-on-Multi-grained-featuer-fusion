@@ -1,4 +1,5 @@
 from random import random
+import os
 import torch
 import torch.nn as nn
 import math
@@ -7,6 +8,16 @@ import torch.backends.cudnn as cudnn
 import numpy as np
 import copy
 from transformers import BertConfig, BertModel, SwinModel
+from contrastive_router import DatasetContrastiveRouter
+
+try:
+    from mamba_ssm import Mamba
+except ImportError as exc:
+    raise ImportError(
+        "mamba-ssm is required for MMFN cross-modal blocks. Install it with: pip install mamba-ssm"
+    ) from exc
+
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
 # Set a manual seed for reproducibility
 manualseed = 666
@@ -17,39 +28,63 @@ torch.cuda.manual_seed(manualseed)
 cudnn.deterministic = True
 
 # Load BERT model and configure its output
-model_name = './bert-base-chinese'
-config = BertConfig.from_pretrained(model_name, num_labels=2)
+model_name = 'bert-base-uncased'
+config = BertConfig.from_pretrained(model_name, num_labels=2, local_files_only=True)
 config.output_hidden_states = False
 
 
-# Definition of the Transformer model
+class CrossMambaBlock(nn.Module):
+    def __init__(self, model_dimension, number_of_layers=1, dropout_probability=0.1):
+        super().__init__()
+        self.src_norm = nn.LayerNorm(model_dimension)
+        self.ctx_norm = nn.LayerNorm(model_dimension)
+        self.fuse = nn.Linear(model_dimension * 2, model_dimension)
+        self.mamba_norms = nn.ModuleList([
+            nn.LayerNorm(model_dimension) for _ in range(number_of_layers)
+        ])
+        self.mamba_layers = nn.ModuleList([
+            Mamba(
+                d_model=model_dimension,
+                d_state=16,
+                d_conv=4,
+                expand=2,
+            ) for _ in range(number_of_layers)
+        ])
+        self.dropout = nn.Dropout(p=dropout_probability)
+
+    def forward(self, src, ctx):
+        src_n = self.src_norm(src)
+        ctx_n = self.ctx_norm(ctx)
+
+        ctx_summary = ctx_n.mean(dim=1, keepdim=True).expand(-1, src_n.size(1), -1)
+        hidden = self.fuse(torch.cat([src_n, ctx_summary], dim=-1))
+
+        for norm_layer, mamba_layer in zip(self.mamba_norms, self.mamba_layers):
+            hidden = hidden + self.dropout(mamba_layer(norm_layer(hidden)))
+
+        return src + self.dropout(hidden)
+
+
+# Kept class name for compatibility with existing calls: self.trans(text_m, image_m)
 class Transformer(nn.Module):
     def __init__(self, model_dimension, number_of_heads, number_of_layers, dropout_probability,
                  log_attention_weights=False):
         super().__init__()
-        # All of these will get deep-copied multiple times internally
-        mha = MultiHeadedAttention(model_dimension, number_of_heads, dropout_probability, log_attention_weights)
-        encoder_layer = EncoderLayer(model_dimension, dropout_probability, mha)
-        self.encoder = Encoder(encoder_layer, number_of_layers)
-        self.init_params()
-
-    def init_params(self, default_initialization=False):
-        if not default_initialization:
-            for name, p in self.named_parameters():
-                if p.dim() > 1:
-                    nn.init.xavier_uniform_(p)
+        self.text_to_image_mamba = CrossMambaBlock(
+            model_dimension=model_dimension,
+            number_of_layers=number_of_layers,
+            dropout_probability=dropout_probability
+        )
+        self.image_to_text_mamba = CrossMambaBlock(
+            model_dimension=model_dimension,
+            number_of_layers=number_of_layers,
+            dropout_probability=dropout_probability
+        )
 
     def forward(self, text, image):
-        src_representations_batch1 = self.encode(text, image)
-        src_representations_batch2 = self.encode(image, text)
-
-        # return src_representations_batch1, src_representations_batch2
-        return text,image
-
-
-    def encode(self, src1, src2):
-        src_representations_batch = self.encoder(src1, src2)  # forward pass through the encoder
-        return src_representations_batch
+        text_att = self.text_to_image_mamba(text, image)
+        image_att = self.image_to_text_mamba(image, text)
+        return text_att, image_att
 
 
 class Encoder(nn.Module):
@@ -164,7 +199,7 @@ class UnimodalDetection(nn.Module):
         super(UnimodalDetection, self).__init__()
 
         self.text_uni = nn.Sequential(
-            nn.Linear(1280, shared_dim),
+            nn.Linear(2048, shared_dim),  # 768 (bert) + 512 (clip text) + 768 (entity bert) = 2048
             nn.BatchNorm1d(shared_dim),
             nn.ReLU(),
             nn.Dropout(p=0.3),
@@ -246,13 +281,18 @@ class MultiModal(nn.Module):
         self.i_projection_net = nn.Linear(1024, 512)  # Linear projection for text
 
         # Load the Swin Transformer model for image processing
-        self.swin = SwinModel.from_pretrained("./swin-base-patch4-window7-224").cuda()
+        self.swin = SwinModel.from_pretrained("microsoft/swin-base-patch4-window7-224", local_files_only=True).cuda()
         for param in self.swin.parameters():
             param.requires_grad = True
 
         # Load BERT model for text processing      
-        self.bert = BertModel.from_pretrained(model_name, config=config).cuda()
+        self.bert = BertModel.from_pretrained(model_name, config=config, local_files_only=True).cuda()
         for param in self.bert.parameters():
+            param.requires_grad = True
+
+        # Load separate BERT model for entity background text
+        self.entity_bert = BertModel.from_pretrained(model_name, config=config, local_files_only=True).cuda()
+        for param in self.entity_bert.parameters():
             param.requires_grad = True
 
         # Initialize unimodal representation modules
@@ -267,6 +307,13 @@ class MultiModal(nn.Module):
             nn.BatchNorm1d(h_dim),
             nn.ReLU(),
             nn.Linear(h_dim, 2)
+        )
+
+        # 对比学习路由器（MVP模式，不使用门控）
+        self.contrastive_router = DatasetContrastiveRouter(
+            hidden_dim=512,
+            proj_dim=128,
+            use_gate=False  # MVP阶段不开启门控
         )
 
     def forward_no_unimodal(self, input_ids, attention_mask, token_type_ids, image_raw, text, image):
@@ -421,7 +468,20 @@ class MultiModal(nn.Module):
         pre_label = self.classifier_corre(final_feature)
         return pre_label
 
-    def forward(self, input_ids, attention_mask, token_type_ids, image_raw, text, image):
+    def forward(
+            self,
+            input_ids,
+            attention_mask,
+            token_type_ids,
+            image_raw,
+            text,
+            image,
+            labels=None,
+            dataset_name="weibo",
+            entity_input_ids=None,
+            entity_attention_mask=None,
+            entity_token_type_ids=None,
+    ):
 
         # Extract features using BERT for textual input
         BERT_feature = self.bert(input_ids=input_ids,
@@ -431,16 +491,37 @@ class MultiModal(nn.Module):
 
         # Compute raw text feature by averaging over tokens
         text_raw = torch.sum(last_hidden_states, dim=1) / 300
+
+        if entity_input_ids is not None and entity_attention_mask is not None and entity_token_type_ids is not None:
+            entity_feature = self.entity_bert(
+                input_ids=entity_input_ids,
+                attention_mask=entity_attention_mask,
+                token_type_ids=entity_token_type_ids
+            )
+            entity_hidden_states = entity_feature['last_hidden_state']
+            entity_raw = torch.sum(entity_hidden_states, dim=1) / 64
+        else:
+            entity_raw = torch.zeros_like(text_raw)
+
         # Process the raw image feature using Swin Transformer
         image_raw = self.swin(image_raw)
 
         # Generate unimodal representations for text and image
-        text_prime, image_prime = self.uni_repre(torch.cat([text_raw, text], 1),
+        text_prime, image_prime = self.uni_repre(torch.cat([text_raw, text, entity_raw], 1),
                                                  torch.cat([image_raw.pooler_output, image], 1))
 
         # Project text and image features to a common space
         text_m = self.t_projection_net(last_hidden_states)
         image_m = self.i_projection_net(image_raw.last_hidden_state)
+
+        # ===== 对比学习：在Transformer之前 =====
+        if self.training and labels is not None:
+            text_m, image_m, loss_dict = self.contrastive_router(
+                text_m, image_m, labels=labels, dataset_name=dataset_name
+            )
+            loss_con = loss_dict["loss_total"]
+        else:
+            loss_con = torch.tensor(0.0, device=text_m.device)
 
         # Apply cross-modal attention
         text_att, image_att = self.trans(text_m, image_m)
@@ -465,4 +546,4 @@ class MultiModal(nn.Module):
         # final prediction
         pre_label = self.classifier_corre(final_feature)
 
-        return pre_label
+        return pre_label, loss_con

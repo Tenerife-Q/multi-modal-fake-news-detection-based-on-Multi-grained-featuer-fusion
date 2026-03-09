@@ -1,0 +1,16 @@
+_PYCACHE_/
+cache/
+.IDEA/
+.VSCODE/
+CKPT/
+DATA/
+GOSSIP/
+twitter/
+weibo/
+*.md
+*.gz
+/root/autodl-tmp/MMFN_yyt/bpe_simple_vocab_16e6.txt.gz
+/root/autodl-tmp/MMFN_yyt/data.txt
+/root/autodl-tmp/MMFN_yyt/test_weibov.csv.bak
+/root/autodl-tmp/MMFN_yyt/test_weibov.csv.bak_rule56_11_20260303_065441
+*.csv

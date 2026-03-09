@@ -20,27 +20,26 @@ clipmodel, preprocess = clip.load('ViT-B/32', device)
 for param in clipmodel.parameters():
     param.requires_grad = False
 
-# Load a feature extractor from the transformers library
-feature_extractor = AutoFeatureExtractor.from_pretrained("./swin-base-patch4-window7-224")
-token = BertTokenizer.from_pretrained('bert-base-chinese')
+# Load from local cache first to avoid network timeout during startup
+feature_extractor = AutoFeatureExtractor.from_pretrained(
+    "microsoft/swin-base-patch4-window7-224", local_files_only=True
+)
+token = BertTokenizer.from_pretrained('bert-base-chinese', local_files_only=True)
 
 
 def read_img(imgs, root_path, LABLEF):
     # Select a random image path from the provided list
     GT_path = imgs[np.random.randint(0, len(imgs))]
-    # if '/' in GT_path:
-    #     GT_path = GT_path[GT_path.rfind('/') + 1:]
-    # GT_path = "{}/{}/{}".format(root_path, LABLEF, GT_path)
+    if '/' in GT_path:
+        GT_path = GT_path[GT_path.rfind('/') + 1:]
+    GT_path = "{}/{}/{}".format(root_path, LABLEF, GT_path)
     # Read the Ground Truth (GT) image
     try:
         img_GT = util.read_img(GT_path)
         img_pro = Image.open(GT_path).convert('RGB')
     except Exception as e:
-        # print("文件存在:", os.path.exists(GT_path))
         img_GT = np.zeros((224, 224, 3))
         img_pro = Image.new('RGB', (224, 224), (255, 255, 255)).convert('RGB')
-        print(GT_path)
-        print(e)
     return img_GT, img_pro
 
 
@@ -50,23 +49,46 @@ class weibo_dataset(data.Dataset):
         self.label_dict = []
         self.swin = feature_extractor
         self.preprocess = preprocess
-        self.local_path = '/home/yutao/MMFN/dataset/weibo'
+        self.local_path = '/root/autodl-tmp/MMFN_yyt'
+        self.root_path = '/root/autodl-tmp/MMFN_yyt/weibo'
         # Read CSV file to populate label_dict
-        gc = pandas.read_csv(self.local_path + '/{}_weibo_preprocess.csv'.format('train' if is_train else 'test'))
+        gc = pandas.read_csv(self.local_path + '/{}_weibov.csv'.format('train' if is_train else 'test'))
         # gc = gc[:100]
         # Populate label_dict with records from the CSV file
         for i in tqdm(range(len(gc))):
             images_name = str(gc.iloc[i, 1])
             label = int(gc.iloc[i, 2])
-            content = str(gc.iloc[i, 4])
+            content = str(gc.iloc[i, 3])
             sum_content = str(gc.iloc[i, 4])
-            has_image = gc.iloc[i, 6]
+            has_image = (images_name != 'nan' and len(images_name.strip()) > 0)
+            if not has_image:
+                continue
+
+            if label == 0:
+                label_folder = 'rumor_images'
+            else:
+                label_folder = 'nonrumor_images'
+
+            valid_images = []
+            for img in images_name.split('|'):
+                img_name = img.strip()
+                if '/' in img_name:
+                    img_name = img_name[img_name.rfind('/') + 1:]
+                if not img_name:
+                    continue
+                img_path = os.path.join(self.root_path, label_folder, img_name)
+                if os.path.exists(img_path):
+                    valid_images.append(img_name)
+
+            if len(valid_images) == 0:
+                continue
+
             record = {}
-            record['images'] = images_name
+            record['images'] = '|'.join(valid_images)
             record['label'] = label
             record['content'] = content
             record['sum_content'] = sum_content
-            record['has_image'] = has_image
+            record['has_image'] = True
             self.label_dict.append(record)
         assert len(self.label_dict) != 0, 'Error: GT path is empty.'
 
@@ -80,7 +102,7 @@ class weibo_dataset(data.Dataset):
             LABLEF = 'nonrumor_images'
         imgs = images.split('|')
         if has_image:
-            img_GT, img_pro = read_img(imgs, self.local_path, LABLEF)
+            img_GT, img_pro = read_img(imgs, self.root_path, LABLEF)
         else:
             img_GT = np.zeros((224, 224, 3))
             img_pro = Image.new('RGB', (224, 224), (255, 255, 255)).convert('RGB')
@@ -89,7 +111,7 @@ class weibo_dataset(data.Dataset):
         image_swin = self.swin(img_GT, return_tensors="pt").pixel_values
         image_clip = self.preprocess(img_pro)
         text_clip = sum_content
-        return (sent, image_swin, image_clip, text_clip), label
+        return (sent, image_swin, image_clip, text_clip), label, item
 
     def __len__(self):
         return len(self.label_dict)
@@ -108,6 +130,7 @@ def collate_fn(data):
     imageclip = [i[0][2] for i in data]
     textclip = [i[0][3] for i in data]
     labels = [i[1] for i in data]
+    sample_indices = [i[2] for i in data]
 
     data = token.batch_encode_plus(batch_text_or_text_pairs=sents,
                                    truncation=True,
@@ -120,7 +143,8 @@ def collate_fn(data):
     input_ids = data['input_ids']
     attention_mask = data['attention_mask']
     token_type_ids = data['token_type_ids']
-    image = torch.stack(image).squeeze()
+    image = torch.stack(image).squeeze(1)
     imageclip = torch.stack(imageclip)
     labels = torch.LongTensor(labels)
-    return input_ids, attention_mask, token_type_ids, image, imageclip, textclip, labels
+    sample_indices = torch.LongTensor(sample_indices)
+    return input_ids, attention_mask, token_type_ids, image, imageclip, textclip, labels, sample_indices

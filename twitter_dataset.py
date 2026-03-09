@@ -9,6 +9,8 @@ from tqdm import tqdm
 from transformers import BertTokenizer, AutoFeatureExtractor
 import clip
 import os
+from imblearn.over_sampling import RandomOverSampler
+from torchvision import transforms
 
 # Determine whether to use CUDA (GPU) or CPU
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -21,8 +23,8 @@ for param in clipmodel.parameters():
     param.requires_grad = False
 
 # Load a feature extractor from the transformers library
-feature_extractor = AutoFeatureExtractor.from_pretrained("./swin-base-patch4-window7-224")
-token = BertTokenizer.from_pretrained('bert-base-chinese')
+feature_extractor = AutoFeatureExtractor.from_pretrained("microsoft/swin-base-patch4-window7-224", local_files_only=True)
+token = BertTokenizer.from_pretrained('bert-base-uncased', local_files_only=True)
 
 
 def read_img(imgs, root_path, LABLEF):
@@ -33,12 +35,14 @@ def read_img(imgs, root_path, LABLEF):
     # GT_path = "{}/{}/{}".format(root_path, LABLEF, GT_path)
     # Read the Ground Truth (GT) image
     try:
-        img_GT = util.read_img(GT_path)
+        # img_GT = util.read_img(GT_path)
         img_pro = Image.open(GT_path).convert('RGB')
+        img_GT = img_pro # Use RGB PIL Image for Swin as well
     except Exception as e:
         # print("文件存在:", os.path.exists(GT_path))
-        img_GT = np.zeros((224, 224, 3))
+        # img_GT = np.zeros((224, 224, 3))
         img_pro = Image.new('RGB', (224, 224), (255, 255, 255)).convert('RGB')
+        img_GT = img_pro
         print(GT_path)
         print(e)
     return img_GT, img_pro
@@ -50,17 +54,17 @@ class twitter_dataset(data.Dataset):
         self.label_dict = []
         self.swin = feature_extractor
         self.preprocess = preprocess
-        self.local_path = '/home/yutao/MMFN/dataset/twitter_dataset'
+        self.local_path = '/root/autodl-tmp/MMFN_yyt/twitter'
         # Read CSV file to populate label_dict
         gc = pandas.read_csv(self.local_path + '/{}_tweets_preprocess.csv'.format('train' if is_train else 'test'))
         # gc = gc[:100]
         # Populate label_dict with records from the CSV file
         for i in tqdm(range(len(gc))):
-            images_name = str(gc.iloc[i, 3])
-            label = int(gc.iloc[i, 6])
-            content = str(gc.iloc[i, 1])
-            sum_content = str(gc.iloc[i, 1])
-            has_image = gc.iloc[i, 7]
+            images_name = str(gc.loc[i, 'imageId(s)'])
+            label = int(gc.loc[i, 'label'])
+            content = str(gc.loc[i, 'tweetText'])
+            sum_content = str(gc.loc[i, 'tweetText'])
+            has_image = gc.loc[i, 'has_image']
             record = {}
             record['images'] = images_name
             record['label'] = label
