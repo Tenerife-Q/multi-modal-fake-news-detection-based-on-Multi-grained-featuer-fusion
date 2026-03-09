@@ -1,10 +1,10 @@
-_PYCACHE_/
+__pycache__/
 cache/
-.IDEA/
-.VSCODE/
-CKPT/
-DATA/
-GOSSIP/
+.idea/
+.vscode/
+ckpt/
+data/
+gossip/
 twitter/
 weibo/
 *.md
