@@ -15,11 +15,13 @@ DATASET_LABEL_TO_VERDICT = {
 }
 
 def normalize_confidence(confidence: float) -> float:
+    """Clip confidence into [0.0, 1.0] and round to 6 decimals for stable payloads."""
     clipped = max(0.0, min(float(confidence), 1.0))
     return round(clipped, 6)
 
 
 def label_to_verdict(dataset: str, predicted_label: int) -> bool:
+    """Map MMFN class ids to a boolean verdict understood by the blockchain side."""
     dataset_key = dataset.lower()
     if dataset_key not in DATASET_LABEL_TO_VERDICT:
         raise ValueError(f"Unsupported dataset '{dataset}'. Expected one of {sorted(DATASET_LABEL_TO_VERDICT)}.")
@@ -34,6 +36,7 @@ def label_to_verdict(dataset: str, predicted_label: int) -> bool:
 
 @dataclass
 class PredictionPayload:
+    """Minimal phase-one payload that standardizes MMFN prediction semantics for later API wiring."""
     dataset: str
     image_path: str
     predicted_label: int
