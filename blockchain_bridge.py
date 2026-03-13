@@ -3,7 +3,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import requests
 
@@ -11,8 +11,14 @@ import requests
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-BLOCKCHAIN_ENDPOINT = os.getenv("YUANJING_API_ENDPOINT", "http://localhost:3000")
-DEFAULT_TIMEOUT = float(os.getenv("YUANJING_API_TIMEOUT", "10.0"))
+# Primary base URL for the yuanjing-core service.
+# Can be overridden via environment variable.
+YUANJING_BASE_URL: str = os.environ.get("YUANJING_BASE_URL", "http://localhost:8080")
+
+# Backward-compatible alias: YUANJING_API_ENDPOINT overrides YUANJING_BASE_URL when set.
+BLOCKCHAIN_ENDPOINT: str = os.environ.get("YUANJING_API_ENDPOINT", YUANJING_BASE_URL)
+
+DEFAULT_TIMEOUT: float = float(os.getenv("YUANJING_API_TIMEOUT", "10.0"))
 
 DATASET_LABEL_TO_VERDICT = {
     "weibo": {
@@ -77,12 +83,17 @@ class PredictionPayload:
 # HTTP client functions
 # ---------------------------------------------------------------------------
 
-def submit_proof(payload: PredictionPayload, timeout: Optional[float] = None) -> dict:
+def submit_proof(
+    payload: PredictionPayload,
+    base_url: str = BLOCKCHAIN_ENDPOINT,
+    timeout: Optional[float] = None,
+) -> Dict[str, Any]:
     """
-    Call the yuanjing-core /prove endpoint to submit a prediction proof.
+    Submit a prediction proof to the yuanjing-core /api/v1/proofs endpoint.
 
     Args:
         payload: A PredictionPayload instance carrying the inference result.
+        base_url: Base URL of the yuanjing-core service.
         timeout: Request timeout in seconds. Falls back to DEFAULT_TIMEOUT.
 
     Returns:
@@ -93,9 +104,8 @@ def submit_proof(payload: PredictionPayload, timeout: Optional[float] = None) ->
         requests.Timeout: Request timed out.
         requests.ConnectionError: Could not reach the service.
     """
-    url = f"{BLOCKCHAIN_ENDPOINT}/prove"
     resp = requests.post(
-        url,
+        f"{base_url}/api/v1/proofs",
         json=payload.to_api_payload(),
         timeout=timeout or DEFAULT_TIMEOUT,
     )
@@ -103,12 +113,17 @@ def submit_proof(payload: PredictionPayload, timeout: Optional[float] = None) ->
     return resp.json()
 
 
-def verify_audit(receipt_id: str, timeout: Optional[float] = None) -> dict:
+def verify_audit(
+    receipt_id: str,
+    base_url: str = BLOCKCHAIN_ENDPOINT,
+    timeout: Optional[float] = None,
+) -> Dict[str, Any]:
     """
-    Call the yuanjing-core /audit/{receipt_id} endpoint to verify a proof.
+    Verify a previously submitted proof via /api/v1/proofs/{receipt_id}.
 
     Args:
         receipt_id: The proof receipt ID returned by submit_proof.
+        base_url: Base URL of the yuanjing-core service.
         timeout: Request timeout in seconds. Falls back to DEFAULT_TIMEOUT.
 
     Returns:
@@ -119,25 +134,30 @@ def verify_audit(receipt_id: str, timeout: Optional[float] = None) -> dict:
         requests.Timeout: Request timed out.
         requests.ConnectionError: Could not reach the service.
     """
-    url = f"{BLOCKCHAIN_ENDPOINT}/audit/{receipt_id}"
-    resp = requests.get(url, timeout=timeout or DEFAULT_TIMEOUT)
+    resp = requests.get(
+        f"{base_url}/api/v1/proofs/{receipt_id}",
+        timeout=timeout or DEFAULT_TIMEOUT,
+    )
     resp.raise_for_status()
     return resp.json()
 
 
-def health_check(timeout: float = 5.0) -> bool:
+def health_check(
+    base_url: str = BLOCKCHAIN_ENDPOINT,
+    timeout: float = 5.0,
+) -> bool:
     """
     Check whether the yuanjing-core service is reachable and healthy.
 
     Args:
+        base_url: Base URL of the yuanjing-core service.
         timeout: Request timeout in seconds.
 
     Returns:
         True if the service responds with HTTP 200, False otherwise.
     """
     try:
-        url = f"{BLOCKCHAIN_ENDPOINT}/health"
-        resp = requests.get(url, timeout=timeout)
+        resp = requests.get(f"{base_url}/health", timeout=timeout)
         return resp.status_code == 200
     except requests.RequestException:
         return False
@@ -146,20 +166,22 @@ def health_check(timeout: float = 5.0) -> bool:
 def submit_proof_with_retry(
     payload: PredictionPayload,
     max_retries: int = 3,
-    retry_delay: float = 1.0,
+    backoff_seconds: float = 1.0,
+    base_url: str = BLOCKCHAIN_ENDPOINT,
     timeout: Optional[float] = None,
-) -> dict:
+) -> Dict[str, Any]:
     """
     Call submit_proof with exponential back-off retry on transient errors.
 
     Retries are attempted only for requests.Timeout and
     requests.ConnectionError. Any other exception (e.g. HTTP 4xx/5xx) is
-    propagated immediately.
+    propagated immediately.  ``max_retries`` must be at least 1.
 
     Args:
         payload: A PredictionPayload instance carrying the inference result.
-        max_retries: Maximum number of attempts (default: 3).
-        retry_delay: Base delay in seconds between retries; doubles each time.
+        max_retries: Maximum number of attempts (default: 3, must be >= 1).
+        backoff_seconds: Base delay in seconds between retries; doubles each time.
+        base_url: Base URL of the yuanjing-core service.
         timeout: Per-request timeout in seconds. Falls back to DEFAULT_TIMEOUT.
 
     Returns:
@@ -168,15 +190,18 @@ def submit_proof_with_retry(
     Raises:
         requests.Timeout or requests.ConnectionError: If all retries are
             exhausted without a successful response.
+        ValueError: If max_retries is less than 1.
     """
+    if max_retries < 1:
+        raise ValueError("max_retries must be >= 1")
     last_exception: Exception = RuntimeError("No attempts made")
     for attempt in range(max_retries):
         try:
-            return submit_proof(payload, timeout=timeout)
+            return submit_proof(payload, base_url=base_url, timeout=timeout)
         except (requests.Timeout, requests.ConnectionError) as exc:
             last_exception = exc
             if attempt < max_retries - 1:
-                wait_time = retry_delay * (2 ** attempt)
+                wait_time = backoff_seconds * (2 ** attempt)
                 logging.warning(
                     "submit_proof retry %d/%d after %.1fs: %s",
                     attempt + 1,

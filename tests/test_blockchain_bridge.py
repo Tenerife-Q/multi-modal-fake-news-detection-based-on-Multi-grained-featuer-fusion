@@ -183,7 +183,7 @@ class BlockchainClientTests(unittest.TestCase):
             mock_response,
         ]
 
-        result = submit_proof_with_retry(self._make_payload(), max_retries=3, retry_delay=1.0)
+        result = submit_proof_with_retry(self._make_payload(), max_retries=3, backoff_seconds=1.0)
 
         self.assertEqual(result["receipt_id"], "xyz")
         self.assertEqual(mock_post.call_count, 2)
@@ -195,7 +195,7 @@ class BlockchainClientTests(unittest.TestCase):
         mock_post.side_effect = requests.Timeout("persistent timeout")
 
         with self.assertRaises(requests.Timeout):
-            submit_proof_with_retry(self._make_payload(), max_retries=3, retry_delay=1.0)
+            submit_proof_with_retry(self._make_payload(), max_retries=3, backoff_seconds=1.0)
 
         self.assertEqual(mock_post.call_count, 3)
         self.assertEqual(mock_sleep.call_count, 2)
