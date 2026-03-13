@@ -1,7 +1,13 @@
+import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict
+from typing import Any, Dict, Optional
 
+import requests
+
+# Base URL for the yuanjing-core service (can be overridden via environment variable).
+YUANJING_BASE_URL: str = os.environ.get("YUANJING_BASE_URL", "http://localhost:8080")
 
 DATASET_LABEL_TO_VERDICT = {
     "weibo": {
@@ -60,3 +66,80 @@ class PredictionPayload:
             "confidence": self.confidence,
             "source": self.source,
         }
+
+
+# ---------------------------------------------------------------------------
+# HTTP client helpers for yuanjing-core
+# ---------------------------------------------------------------------------
+
+def health_check(base_url: str = YUANJING_BASE_URL, timeout: int = 5) -> bool:
+    """Return True if the yuanjing-core service is reachable and healthy."""
+    try:
+        response = requests.get(f"{base_url}/health", timeout=timeout)
+        return response.status_code == 200
+    except requests.RequestException:
+        return False
+
+
+def submit_proof(
+    payload: PredictionPayload,
+    base_url: str = YUANJING_BASE_URL,
+    timeout: int = 30,
+) -> Dict[str, Any]:
+    """Submit a prediction proof to the yuanjing-core service.
+
+    Returns the JSON response body as a dict.
+    Raises :class:`requests.HTTPError` on a non-2xx response.
+    """
+    response = requests.post(
+        f"{base_url}/api/v1/proofs",
+        json=payload.to_api_payload(),
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def submit_proof_with_retry(
+    payload: PredictionPayload,
+    max_retries: int = 3,
+    backoff_seconds: float = 2.0,
+    base_url: str = YUANJING_BASE_URL,
+    timeout: int = 30,
+) -> Dict[str, Any]:
+    """Submit a prediction proof with exponential-backoff retry.
+
+    Retries on :class:`requests.RequestException` (network errors, timeouts).
+    Re-raises the last exception if all attempts are exhausted.
+    ``max_retries`` must be at least 1.
+    """
+    if max_retries < 1:
+        raise ValueError("max_retries must be >= 1")
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            return submit_proof(payload, base_url=base_url, timeout=timeout)
+        except requests.RequestException as exc:
+            last_exc = exc
+            if attempt < max_retries:
+                sleep_time = backoff_seconds * (2 ** (attempt - 1))
+                time.sleep(sleep_time)
+    raise last_exc  # type: ignore[misc]
+
+
+def verify_audit(
+    receipt_id: str,
+    base_url: str = YUANJING_BASE_URL,
+    timeout: int = 30,
+) -> Dict[str, Any]:
+    """Verify a previously submitted proof by its receipt ID.
+
+    Returns the JSON verification result.
+    Raises :class:`requests.HTTPError` on a non-2xx response.
+    """
+    response = requests.get(
+        f"{base_url}/api/v1/proofs/{receipt_id}",
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    return response.json()
