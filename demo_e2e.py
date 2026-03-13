@@ -37,7 +37,7 @@ def demo_health() -> int:
         return 1
 
 
-def demo_submit(image_path: str, dataset: str, predicted_label: int, confidence: float) -> int:
+def demo_submit(image_path: str, dataset: str, predicted_label: int, confidence: float, model_hash: str) -> int:
     """
     模拟 AI 推理结果并提交到链上
 
@@ -54,6 +54,7 @@ def demo_submit(image_path: str, dataset: str, predicted_label: int, confidence:
         image_path=image_path,
         predicted_label=predicted_label,
         confidence=confidence,
+        prompt_pool_hash=model_hash,
     )
 
     print(f"\n📤 Submitting proof to blockchain...")
@@ -133,6 +134,12 @@ Examples:
         help="Prediction confidence (0.0-1.0)",
     )
     parser.add_argument(
+        "--model-hash",
+        type=str,
+        default="0" * 64,
+        help="Model version hash (prompt_pool_hash), 64 hex characters",
+    )
+    parser.add_argument(
         "--verify",
         type=str,
         metavar="RECEIPT_ID",
@@ -151,7 +158,7 @@ Examples:
 
     # 提交新存证
     if args.image:
-        sys.exit(demo_submit(args.image, args.dataset, args.label, args.confidence))
+        sys.exit(demo_submit(args.image, args.dataset, args.label, args.confidence, args.model_hash))
 
     # 没有提供任何参数，显示帮助
     parser.print_help()

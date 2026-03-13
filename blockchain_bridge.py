@@ -13,7 +13,7 @@ import requests
 # ---------------------------------------------------------------------------
 # Primary base URL for the yuanjing-core service.
 # Can be overridden via environment variable.
-YUANJING_BASE_URL: str = os.environ.get("YUANJING_BASE_URL", "http://localhost:8080")
+YUANJING_BASE_URL: str = os.environ.get("YUANJING_BASE_URL", "http://localhost:3000")
 
 # Backward-compatible alias: YUANJING_API_ENDPOINT overrides YUANJING_BASE_URL when set.
 BLOCKCHAIN_ENDPOINT: str = os.environ.get("YUANJING_API_ENDPOINT", YUANJING_BASE_URL)
@@ -59,6 +59,7 @@ class PredictionPayload:
     predicted_label: int
     confidence: float
     source: str = "mmfn"
+    prompt_pool_hash: str = "0" * 64
 
     def __post_init__(self) -> None:
         self.dataset = self.dataset.lower()
@@ -76,6 +77,7 @@ class PredictionPayload:
             "verdict": self.verdict,
             "confidence": self.confidence,
             "source": self.source,
+            "prompt_pool_hash": self.prompt_pool_hash,
         }
 
 
@@ -105,7 +107,7 @@ def submit_proof(
         requests.ConnectionError: Could not reach the service.
     """
     resp = requests.post(
-        f"{base_url}/api/v1/proofs",
+        f"{base_url}/prove",
         json=payload.to_api_payload(),
         timeout=timeout or DEFAULT_TIMEOUT,
     )
@@ -135,7 +137,7 @@ def verify_audit(
         requests.ConnectionError: Could not reach the service.
     """
     resp = requests.get(
-        f"{base_url}/api/v1/proofs/{receipt_id}",
+        f"{base_url}/audit/{receipt_id}",
         timeout=timeout or DEFAULT_TIMEOUT,
     )
     resp.raise_for_status()
@@ -147,18 +149,19 @@ def health_check(
     timeout: float = 5.0,
 ) -> bool:
     """
-    Check whether the yuanjing-core service is reachable and healthy.
+    Check whether the yuanjing-core service is reachable.
+    Since yuanjing-core doesn't have a /health endpoint, we try to connect to the base URL.
 
     Args:
         base_url: Base URL of the yuanjing-core service.
         timeout: Request timeout in seconds.
 
     Returns:
-        True if the service responds with HTTP 200, False otherwise.
+        True if the service responds (any HTTP status), False if unreachable.
     """
     try:
-        resp = requests.get(f"{base_url}/health", timeout=timeout)
-        return resp.status_code == 200
+        requests.get(base_url, timeout=timeout)
+        return True
     except requests.RequestException:
         return False
 
