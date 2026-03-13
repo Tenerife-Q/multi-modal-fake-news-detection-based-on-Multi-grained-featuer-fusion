@@ -1,3 +1,4 @@
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -6,8 +7,18 @@ from typing import Any, Dict, Optional
 
 import requests
 
-# Base URL for the yuanjing-core service (can be overridden via environment variable).
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+# Primary base URL for the yuanjing-core service.
+# Can be overridden via environment variable.
 YUANJING_BASE_URL: str = os.environ.get("YUANJING_BASE_URL", "http://localhost:8080")
+
+# Backward-compatible alias: YUANJING_API_ENDPOINT overrides YUANJING_BASE_URL when set.
+BLOCKCHAIN_ENDPOINT: str = os.environ.get("YUANJING_API_ENDPOINT", YUANJING_BASE_URL)
+
+DEFAULT_TIMEOUT: float = float(os.getenv("YUANJING_API_TIMEOUT", "10.0"))
 
 DATASET_LABEL_TO_VERDICT = {
     "weibo": {
@@ -69,77 +80,134 @@ class PredictionPayload:
 
 
 # ---------------------------------------------------------------------------
-# HTTP client helpers for yuanjing-core
+# HTTP client functions
 # ---------------------------------------------------------------------------
-
-def health_check(base_url: str = YUANJING_BASE_URL, timeout: int = 5) -> bool:
-    """Return True if the yuanjing-core service is reachable and healthy."""
-    try:
-        response = requests.get(f"{base_url}/health", timeout=timeout)
-        return response.status_code == 200
-    except requests.RequestException:
-        return False
-
 
 def submit_proof(
     payload: PredictionPayload,
-    base_url: str = YUANJING_BASE_URL,
-    timeout: int = 30,
+    base_url: str = BLOCKCHAIN_ENDPOINT,
+    timeout: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Submit a prediction proof to the yuanjing-core service.
-
-    Returns the JSON response body as a dict.
-    Raises :class:`requests.HTTPError` on a non-2xx response.
     """
-    response = requests.post(
+    Submit a prediction proof to the yuanjing-core /api/v1/proofs endpoint.
+
+    Args:
+        payload: A PredictionPayload instance carrying the inference result.
+        base_url: Base URL of the yuanjing-core service.
+        timeout: Request timeout in seconds. Falls back to DEFAULT_TIMEOUT.
+
+    Returns:
+        JSON dict returned by the API (contains receipt_id, etc.).
+
+    Raises:
+        requests.HTTPError: API returned a non-2xx status code.
+        requests.Timeout: Request timed out.
+        requests.ConnectionError: Could not reach the service.
+    """
+    resp = requests.post(
         f"{base_url}/api/v1/proofs",
         json=payload.to_api_payload(),
-        timeout=timeout,
+        timeout=timeout or DEFAULT_TIMEOUT,
     )
-    response.raise_for_status()
-    return response.json()
+    resp.raise_for_status()
+    return resp.json()
+
+
+def verify_audit(
+    receipt_id: str,
+    base_url: str = BLOCKCHAIN_ENDPOINT,
+    timeout: Optional[float] = None,
+) -> Dict[str, Any]:
+    """
+    Verify a previously submitted proof via /api/v1/proofs/{receipt_id}.
+
+    Args:
+        receipt_id: The proof receipt ID returned by submit_proof.
+        base_url: Base URL of the yuanjing-core service.
+        timeout: Request timeout in seconds. Falls back to DEFAULT_TIMEOUT.
+
+    Returns:
+        JSON dict returned by the API (contains verification status).
+
+    Raises:
+        requests.HTTPError: API returned a non-2xx status code.
+        requests.Timeout: Request timed out.
+        requests.ConnectionError: Could not reach the service.
+    """
+    resp = requests.get(
+        f"{base_url}/api/v1/proofs/{receipt_id}",
+        timeout=timeout or DEFAULT_TIMEOUT,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def health_check(
+    base_url: str = BLOCKCHAIN_ENDPOINT,
+    timeout: float = 5.0,
+) -> bool:
+    """
+    Check whether the yuanjing-core service is reachable and healthy.
+
+    Args:
+        base_url: Base URL of the yuanjing-core service.
+        timeout: Request timeout in seconds.
+
+    Returns:
+        True if the service responds with HTTP 200, False otherwise.
+    """
+    try:
+        resp = requests.get(f"{base_url}/health", timeout=timeout)
+        return resp.status_code == 200
+    except requests.RequestException:
+        return False
 
 
 def submit_proof_with_retry(
     payload: PredictionPayload,
     max_retries: int = 3,
-    backoff_seconds: float = 2.0,
-    base_url: str = YUANJING_BASE_URL,
-    timeout: int = 30,
+    backoff_seconds: float = 1.0,
+    base_url: str = BLOCKCHAIN_ENDPOINT,
+    timeout: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Submit a prediction proof with exponential-backoff retry.
+    """
+    Call submit_proof with exponential back-off retry on transient errors.
 
-    Retries on :class:`requests.RequestException` (network errors, timeouts).
-    Re-raises the last exception if all attempts are exhausted.
-    ``max_retries`` must be at least 1.
+    Retries are attempted only for requests.Timeout and
+    requests.ConnectionError. Any other exception (e.g. HTTP 4xx/5xx) is
+    propagated immediately.  ``max_retries`` must be at least 1.
+
+    Args:
+        payload: A PredictionPayload instance carrying the inference result.
+        max_retries: Maximum number of attempts (default: 3, must be >= 1).
+        backoff_seconds: Base delay in seconds between retries; doubles each time.
+        base_url: Base URL of the yuanjing-core service.
+        timeout: Per-request timeout in seconds. Falls back to DEFAULT_TIMEOUT.
+
+    Returns:
+        JSON dict returned by the API on success.
+
+    Raises:
+        requests.Timeout or requests.ConnectionError: If all retries are
+            exhausted without a successful response.
+        ValueError: If max_retries is less than 1.
     """
     if max_retries < 1:
         raise ValueError("max_retries must be >= 1")
-    last_exc: Optional[Exception] = None
-    for attempt in range(1, max_retries + 1):
+    last_exception: Exception = RuntimeError("No attempts made")
+    for attempt in range(max_retries):
         try:
             return submit_proof(payload, base_url=base_url, timeout=timeout)
-        except requests.RequestException as exc:
-            last_exc = exc
-            if attempt < max_retries:
-                sleep_time = backoff_seconds * (2 ** (attempt - 1))
-                time.sleep(sleep_time)
-    raise last_exc  # type: ignore[misc]
-
-
-def verify_audit(
-    receipt_id: str,
-    base_url: str = YUANJING_BASE_URL,
-    timeout: int = 30,
-) -> Dict[str, Any]:
-    """Verify a previously submitted proof by its receipt ID.
-
-    Returns the JSON verification result.
-    Raises :class:`requests.HTTPError` on a non-2xx response.
-    """
-    response = requests.get(
-        f"{base_url}/api/v1/proofs/{receipt_id}",
-        timeout=timeout,
-    )
-    response.raise_for_status()
-    return response.json()
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            last_exception = exc
+            if attempt < max_retries - 1:
+                wait_time = backoff_seconds * (2 ** attempt)
+                logging.warning(
+                    "submit_proof retry %d/%d after %.1fs: %s",
+                    attempt + 1,
+                    max_retries,
+                    wait_time,
+                    exc,
+                )
+                time.sleep(wait_time)
+    raise last_exception
