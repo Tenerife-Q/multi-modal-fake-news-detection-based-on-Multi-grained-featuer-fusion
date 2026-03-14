@@ -43,6 +43,7 @@ class BlockchainBridgeTests(unittest.TestCase):
                 "verdict": False,
                 "confidence": 1.0,
                 "source": "mmfn-eval",
+                "prompt_pool_hash": "0" * 64,
             },
         )
 
@@ -139,12 +140,12 @@ class BlockchainClientTests(unittest.TestCase):
         self.assertTrue(health_check())
 
     @patch("blockchain_bridge.requests.get")
-    def test_health_check_non_200(self, mock_get):
+    def test_health_check_non_200_still_reachable(self, mock_get):
         mock_response = Mock()
-        mock_response.status_code = 503
+        mock_response.status_code = 404
         mock_get.return_value = mock_response
 
-        self.assertFalse(health_check())
+        self.assertTrue(health_check())
 
     @patch("blockchain_bridge.requests.get")
     def test_health_check_connection_error(self, mock_get):
