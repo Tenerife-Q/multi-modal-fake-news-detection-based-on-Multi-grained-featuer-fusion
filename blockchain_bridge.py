@@ -91,7 +91,7 @@ def submit_proof(
     timeout: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
-    Submit a prediction proof to the yuanjing-core /api/v1/proofs endpoint.
+    Submit a prediction proof to the yuanjing-core POST /prove endpoint.
 
     Args:
         payload: A PredictionPayload instance carrying the inference result.
@@ -121,7 +121,7 @@ def verify_audit(
     timeout: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
-    Verify a previously submitted proof via /api/v1/proofs/{receipt_id}.
+    Verify a previously submitted proof via GET /audit/{pos}.
 
     Args:
         receipt_id: The proof receipt ID returned by submit_proof.
