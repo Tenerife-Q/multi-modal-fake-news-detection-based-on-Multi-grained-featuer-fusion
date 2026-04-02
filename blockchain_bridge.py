@@ -63,7 +63,7 @@ class PredictionPayload:
 
     def __post_init__(self) -> None:
         self.dataset = self.dataset.lower()
-        self.image_path = str(Path(self.image_path))
+        self.image_path = str(Path(self.image_path).resolve())
         self.predicted_label = int(self.predicted_label)
         self.confidence = normalize_confidence(self.confidence)
 
